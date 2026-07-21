@@ -84,6 +84,15 @@ func add_top_row(num_colors := 5) -> void:
 		new_row.append(randi() % num_colors)
 	grid.insert(0, new_row)
 
+## Grow the grid DOWNWARD with blank rows so `row` exists. Landing a bubble just
+## below the last allocated row must extend the grid, not deflect sideways.
+func ensure_row(row: int) -> void:
+	while grid.size() <= row:
+		var arr: Array = []
+		for col in row_len(grid.size()):
+			arr.append(-1)
+		grid.append(arr)
+
 ## Deepest row index still holding a bubble (for the loss check). -1 if the board is empty.
 func lowest_filled_row() -> int:
 	for row in range(grid.size() - 1, -1, -1):

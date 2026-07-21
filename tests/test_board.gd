@@ -58,6 +58,21 @@ func _initialize() -> void:
 	var r5 = b5.place(0, 2, 3)
 	fails += _eq("match after descend", r5.popped.size(), 3)
 
+	# Test 6 — the grid grows DOWNWARD when a bubble lands below the last row
+	# (regression: stacks used to deflect sideways at the array edge instead of
+	# descending toward the loss line).
+	var b6 = Board.new()
+	b6.blank()
+	var want_len: int = b6.row_len(Board.ROWS)
+	b6.ensure_row(Board.ROWS)
+	fails += _eq("grow-down: +1 row", b6.grid.size(), Board.ROWS + 1)
+	fails += _eq("grow-down: row len", b6.grid[Board.ROWS].size(), want_len)
+	fails += _eq("grow-down: blank", b6.grid[Board.ROWS][0], -1)
+	b6.add_top_row(5)                        # parity flips; lengths must stay consistent
+	b6.ensure_row(b6.grid.size() + 1)
+	var last: int = b6.grid.size() - 1
+	fails += _eq("grow-down after descend: len", b6.grid[last].size(), b6.row_len(last))
+
 	if fails == 0:
 		print("ALL TESTS PASSED")
 	else:

@@ -15,12 +15,20 @@ const HL := HORIZONTAL_ALIGNMENT_LEFT
 const HEADER_H := 110.0
 const SAVE_PATH := "user://sheen.cfg"
 const PRICE := "$1.99"
+const PRICE_ALL := "$4.99"
+const FINISHES := ["auto", "gloss", "neon", "matte", "clear"]   # bubble finish override; "auto" follows the theme
 
 var board
 var theme_id := "sheen"
 var owned := {"sheen": true}     # set of unlocked theme ids
 var paused := false
 var shop_open := false
+var bubble_style := "auto"       # one of FINISHES; free customization, not an IAP
+var shop_scroll := 0.0
+var shop_pressing := false       # a press started inside the shop sheet
+var shop_moved := false          # that press dragged far enough to count as a scroll
+var shop_start := Vector2.ZERO
+var shop_last := Vector2.ZERO
 
 var r: float
 var row_h: float
@@ -94,7 +102,7 @@ func _theme() -> Dictionary:
 func _pick_color() -> int:
 	var c: Array = board.colors_in_grid()
 	if c.is_empty():
-		return randi() % 6
+		return randi() % 5   # only palette[0..4] are in play
 	return c[randi() % c.size()]
 
 # ---------- save / ownership ----------
@@ -106,16 +114,20 @@ func _load_save() -> void:
 			owned[id] = true
 		theme_id = cf.get_value("progress", "theme", "sheen")
 		sound_on = cf.get_value("progress", "sound", true)
+		bubble_style = cf.get_value("progress", "bubble", "auto")
 	if not owned.has("sheen"):
 		owned["sheen"] = true
 	if not owned.has(theme_id):
 		theme_id = "sheen"
+	if not FINISHES.has(bubble_style):
+		bubble_style = "auto"
 
 func _save() -> void:
 	var cf := ConfigFile.new()
 	cf.set_value("progress", "owned", owned.keys())
 	cf.set_value("progress", "theme", theme_id)
 	cf.set_value("progress", "sound", sound_on)
+	cf.set_value("progress", "bubble", bubble_style)
 	cf.save(SAVE_PATH)
 
 func _is_free(id: String) -> bool:
@@ -161,9 +173,11 @@ func _hits_grid(x: float, y: float) -> bool:
 func _nearest_cell(x: float, y: float) -> Vector2i:
 	var best := Vector2i(-1, -1)
 	var bd := INF
-	for row in board.grid.size():
-		for col in board.grid[row].size():
-			if board.grid[row][col] != -1:
+	var nrows: int = board.grid.size()
+	for row in nrows + 1:   # +1: the stack may grow one row past the allocated grid
+		var rl: int = board.grid[row].size() if row < nrows else board.row_len(row)
+		for col in rl:
+			if row < nrows and board.grid[row][col] != -1:
 				continue
 			if row != 0 and not board.has_filled_neighbor(row, col):
 				continue
@@ -197,6 +211,7 @@ func _settle(x: float, y: float, ci: int) -> void:
 	var cell := _nearest_cell(x, y)
 	if cell.x < 0:
 		return
+	board.ensure_row(cell.x)
 	var res: Dictionary = board.place(cell.x, cell.y, ci)
 	for p in res.popped:
 		pops.append({"pos": cell_pos(p.cell), "ci": p.ci, "t": 0.0, "drop": false, "vel": 0.0})
@@ -266,6 +281,25 @@ func _shade(c: Color, amt: float) -> Color:
 func _rgba(c: Color, a: float) -> Color:
 	return Color(c.r, c.g, c.b, a)
 
+# WCAG relative luminance / contrast — used to keep button text readable on any accent
+func _lin_ch(u: float) -> float:
+	return u / 12.92 if u <= 0.04045 else pow((u + 0.055) / 1.055, 2.4)
+
+func _lum(c: Color) -> float:
+	return 0.2126 * _lin_ch(c.r) + 0.7152 * _lin_ch(c.g) + 0.0722 * _lin_ch(c.b)
+
+func _contrast(a: Color, b: Color) -> float:
+	var x := _lum(a)
+	var y := _lum(b)
+	return (max(x, y) + 0.05) / (min(x, y) + 0.05)
+
+# Text color for accent-filled buttons: white, unless the theme's dark tone reads better
+# (e.g. Neon's cyan pills would leave white text illegible).
+func _on_accent(th: Dictionary) -> Color:
+	var acc := Color(th.accent)
+	var dark := Color(th.fg) if _lum(Color(th.fg)) < _lum(Color(th.bg)) else Color(th.bg)
+	return Color(1, 1, 1) if _contrast(Color(1, 1, 1), acc) >= _contrast(dark, acc) else dark
+
 # rounded rect with optional border + soft drop shadow (the polish workhorse)
 func _rrect(rect: Rect2, color: Color, radius: int, bw := 0, bcol := Color(0, 0, 0, 0), shadow := 0) -> void:
 	var s := StyleBoxFlat.new()
@@ -282,14 +316,17 @@ func _rrect(rect: Rect2, color: Color, radius: int, bw := 0, bcol := Color(0, 0,
 func _text_w(s: String, size: int) -> float:
 	return font.get_string_size(s, HL, -1, size).x
 
-func _draw_bubble(pos: Vector2, rad: float, ci: int, alpha := 1.0) -> void:
+func _draw_bubble(pos: Vector2, rad: float, ci: int, alpha := 1.0, force_style := "") -> void:
 	var th := _theme()
 	var base := Color(th.palette[ci])
-	var style: String = th.style
+	var style: String = force_style
+	if style == "":
+		style = String(th.style) if bubble_style == "auto" else bubble_style
 	if style == "neon":
+		draw_circle(pos, rad * 1.34, _rgba(base, 0.10 * alpha))
 		draw_circle(pos, rad * 1.15, _rgba(base, 0.22 * alpha))
 		draw_circle(pos, rad * 0.98, _rgba(base, alpha))
-		draw_circle(pos, rad * 0.60, _rgba(_shade(base, -0.28), alpha))
+		draw_circle(pos, rad * 0.60, _rgba(_shade(base, -0.42), alpha))
 		draw_circle(pos, rad * 0.42, _rgba(base, alpha))
 		draw_circle(pos - Vector2(rad * 0.30, rad * 0.32), rad * 0.15, Color(1, 1, 1, 0.85 * alpha))
 	elif style == "matte":
@@ -297,18 +334,26 @@ func _draw_bubble(pos: Vector2, rad: float, ci: int, alpha := 1.0) -> void:
 		draw_circle(pos, rad * 0.96, _rgba(base, alpha))
 		draw_arc(pos, rad * 0.88, 0, TAU, 40, _rgba(_shade(base, -0.18), alpha), rad * 0.14, true)
 		draw_circle(pos - Vector2(rad * 0.28, rad * 0.30), rad * 0.28, Color(1, 1, 1, 0.20 * alpha))
+	elif style == "clear": # glass: tinted body, strong colored rim, sheen band
+		draw_circle(pos, rad * 0.94, _rgba(base, 0.28 * alpha))
+		draw_arc(pos, rad * 0.86, 0, TAU, 48, _rgba(base, 0.95 * alpha), rad * 0.11, true)
+		draw_arc(pos, rad * 0.62, -2.6, -0.9, 14, Color(1, 1, 1, 0.5 * alpha), rad * 0.09, true)
+		draw_circle(pos - Vector2(rad * 0.24, rad * 0.32), rad * 0.15, Color(1, 1, 1, 0.9 * alpha))
+		draw_circle(pos + Vector2(rad * 0.28, rad * 0.30), rad * 0.11, _rgba(base, 0.55 * alpha))
 	else: # gloss
 		draw_circle(pos, rad * 0.98, _rgba(base, alpha))
+		draw_arc(pos, rad * 0.80, 0.5, PI - 0.5, 22, _rgba(_shade(base, -0.30), 0.45 * alpha), rad * 0.22, true)
 		draw_circle(pos - Vector2(0, rad * 0.28), rad * 0.60, _rgba(_shade(base, 0.38), 0.6 * alpha))
 		draw_circle(pos - Vector2(rad * 0.26, rad * 0.34), rad * 0.18, Color(1, 1, 1, 0.9 * alpha))
 		draw_circle(pos + Vector2(rad * 0.22, rad * 0.26), rad * 0.08, Color(1, 1, 1, 0.35 * alpha))
+		draw_arc(pos, rad * 0.93, 0, TAU, 48, _rgba(_shade(base, -0.32), 0.35 * alpha), rad * 0.06, true)
 
 func _stroke_rect(rect: Rect2, col: Color, wide: float) -> void:
 	draw_rect(rect, col, false, wide)
 
 func _draw_pill(rect: Rect2, label: String, th: Dictionary, filled: bool) -> void:
 	var bg := Color(th.accent) if filled else _rgba(Color(th.fg), 0.10)
-	var tc := Color(1, 1, 1) if filled else Color(th.fg)
+	var tc := _on_accent(th) if filled else Color(th.fg)
 	_rrect(rect, bg, int(rect.size.y / 2), 0, Color(0, 0, 0, 0), 3 if filled else 0)
 	draw_string(font, rect.position + Vector2(rect.size.x / 2 - _text_w(label, 26) / 2, rect.size.y / 2 + 9), label, HL, -1, 26, tc)
 
@@ -337,7 +382,7 @@ func _draw_pause(th: Dictionary) -> void:
 	draw_string(font, Vector2(W / 2 - _text_w(t, 72) / 2, H / 2 - 60), t, HL, -1, 72, Color(1, 1, 1))
 	var rb := _resume_btn()
 	_rrect(rb, Color(th.accent), int(rb.size.y / 2), 0, Color(0, 0, 0, 0), 4)
-	draw_string(font, rb.position + Vector2(rb.size.x / 2 - _text_w("Resume", 30) / 2, rb.size.y / 2 + 11), "Resume", HL, -1, 30, Color(1, 1, 1))
+	draw_string(font, rb.position + Vector2(rb.size.x / 2 - _text_w("Resume", 30) / 2, rb.size.y / 2 + 11), "Resume", HL, -1, 30, _on_accent(th))
 	var pr := _prestart_btn()
 	_rrect(pr, Color(1, 1, 1, 0.13), int(pr.size.y / 2))
 	draw_string(font, pr.position + Vector2(pr.size.x / 2 - _text_w("Restart", 30) / 2, pr.size.y / 2 + 11), "Restart", HL, -1, 30, Color(1, 1, 1, 0.92))
@@ -345,40 +390,75 @@ func _draw_pause(th: Dictionary) -> void:
 	_rrect(hb, Color(1, 1, 1, 0.13), int(hb.size.y / 2))
 	draw_string(font, hb.position + Vector2(hb.size.x / 2 - _text_w("Home", 30) / 2, hb.size.y / 2 + 11), "Home", HL, -1, 30, Color(1, 1, 1, 0.92))
 
-# shop rows
+# shop — scrollable sheet: Bubbles (finish chips) + Themes (rows)
 const SHEET_TOP := 140.0
-func _shop_close() -> Rect2: return Rect2(W - 92, SHEET_TOP + 20, 64, 64)
-func _shop_row(i: int) -> Rect2:
-	var y0 := 244.0
-	var rh := (H - 40.0 - y0) / 8.0
-	return Rect2(30, y0 + i * rh, W - 60, rh - 16)
+const SHEET_HEAD := 112.0      # fixed band with the "Shop" title + close button
+func _shop_close() -> Rect2: return Rect2(W - 92, SHEET_TOP + 24, 64, 64)
+func _content_y(y: float) -> float: return SHEET_TOP + SHEET_HEAD + y - shop_scroll
+func _finish_chip(i: int) -> Rect2:
+	var cw := (W - 60.0 - 48.0) / 5.0
+	return Rect2(30.0 + i * (cw + 12.0), _content_y(58.0), cw, 108.0)
+func _unlock_all_visible() -> bool: return owned.size() < Themes.ORDER.size()
+func _unlock_row() -> Rect2: return Rect2(30.0, _content_y(238.0), W - 60.0, 78.0)
+func _rows_base() -> float: return 238.0 + (94.0 if _unlock_all_visible() else 0.0)
+func _shop_row(i: int) -> Rect2: return Rect2(30.0, _content_y(_rows_base() + i * 118.0), W - 60.0, 104.0)
+func _shop_max_scroll() -> float:
+	var content_h := _rows_base() + Themes.ORDER.size() * 118.0 + 20.0
+	return maxf(0.0, content_h - (H - SHEET_TOP - SHEET_HEAD - 10.0))
 func _shop_action(row: Rect2) -> Rect2:
 	return Rect2(row.position.x + row.size.x - 184, row.position.y + row.size.y / 2 - 32, 160, 64)
 
 func _draw_shop(th: Dictionary) -> void:
+	var fg := Color(th.fg)
 	draw_rect(Rect2(0, 0, W, H), Color(0, 0, 0, 0.45))                                   # scrim
 	_rrect(Rect2(0, SHEET_TOP, W, H - SHEET_TOP + 40), Color(th.panel), 36, 0, Color(0, 0, 0, 0), 14)  # rounded sheet
-	draw_string(font, Vector2(40, SHEET_TOP + 74), "Themes", HL, -1, 50, Color(th.fg))
-	var cb := _shop_close()
-	_rrect(cb, _rgba(Color(th.fg), 0.10), int(cb.size.y / 2))
-	draw_string(font, cb.position + Vector2(cb.size.x / 2 - _text_w("X", 32) / 2, cb.size.y / 2 + 12), "X", HL, -1, 32, Color(th.fg))
+	# --- scrolled content ---
+	draw_string(font, Vector2(40, _content_y(38)), "Bubbles", HL, -1, 26, _rgba(fg, 0.55))
+	for i in FINISHES.size():
+		var chip := _finish_chip(i)
+		if bubble_style == FINISHES[i]:
+			_rrect(chip, _rgba(Color(th.accent), 0.13), 20, 3, Color(th.accent))
+		else:
+			_rrect(chip, _rgba(fg, 0.05), 20)
+		var pstyle: String = String(th.style) if i == 0 else String(FINISHES[i])
+		_draw_bubble(Vector2(chip.position.x + chip.size.x / 2, chip.position.y + 40), 21, i, 1.0, pstyle)
+		var lb: String = FINISHES[i].capitalize()
+		draw_string(font, Vector2(chip.position.x + chip.size.x / 2 - _text_w(lb, 22) / 2, chip.position.y + 92), lb, HL, -1, 22, fg)
+	draw_string(font, Vector2(40, _content_y(222)), "Themes", HL, -1, 26, _rgba(fg, 0.55))
+	if _unlock_all_visible():
+		var ur := _unlock_row()
+		_rrect(ur, _rgba(Color(th.accent), 0.08), 22, 2, _rgba(Color(th.accent), 0.55))
+		draw_string(font, Vector2(ur.position.x + 28, ur.position.y + ur.size.y / 2 + 11), "Unlock everything", HL, -1, 30, fg)
+		_draw_pill(Rect2(ur.position.x + ur.size.x - 184, ur.position.y + ur.size.y / 2 - 28, 160, 56), PRICE_ALL, th, true)
 	for i in Themes.ORDER.size():
 		var id: String = Themes.ORDER[i]
 		var t: Dictionary = Themes.THEMES[id]
 		var rect := _shop_row(i)
+		if rect.position.y + rect.size.y < SHEET_TOP + SHEET_HEAD or rect.position.y > H:
+			continue   # off-screen row
 		var is_owned := owned.has(id)
 		var active := theme_id == id
 		if active:
 			_rrect(rect, _rgba(Color(th.accent), 0.13), 22, 3, Color(th.accent))
 		else:
-			_rrect(rect, _rgba(Color(th.fg), 0.05), 22)
+			_rrect(rect, _rgba(fg, 0.05), 22)
 		var cy := rect.position.y + rect.size.y / 2
 		for s in 5:
 			draw_circle(Vector2(rect.position.x + 44 + s * 40, cy), 15, Color(t.palette[s]))
-		draw_string(font, Vector2(rect.position.x + 262, cy - 2), t.name, HL, -1, 34, Color(th.fg))
-		draw_string(font, Vector2(rect.position.x + 262, cy + 32), "Free" if _is_free(id) else "Premium theme", HL, -1, 22, _rgba(Color(th.fg), 0.6))
+		draw_string(font, Vector2(rect.position.x + 262, cy - 2), t.name, HL, -1, 34, fg)
+		draw_string(font, Vector2(rect.position.x + 262, cy + 32), "Free" if _is_free(id) else "Premium theme", HL, -1, 22, _rgba(fg, 0.6))
 		var label := "Applied" if active else ("Apply" if is_owned else PRICE)
 		_draw_pill(_shop_action(rect), label, th, (not is_owned) or active)
+	# --- fixed header, drawn over the scrolled content ---
+	var hs := StyleBoxFlat.new()
+	hs.bg_color = Color(th.panel)
+	hs.corner_radius_top_left = 36
+	hs.corner_radius_top_right = 36
+	draw_style_box(hs, Rect2(0, SHEET_TOP, W, SHEET_HEAD))
+	draw_string(font, Vector2(40, SHEET_TOP + 74), "Shop", HL, -1, 50, fg)
+	var cb := _shop_close()
+	_rrect(cb, _rgba(fg, 0.10), int(cb.size.y / 2))
+	draw_string(font, cb.position + Vector2(cb.size.x / 2 - _text_w("X", 32) / 2, cb.size.y / 2 + 12), "X", HL, -1, 32, fg)
 
 func _draw_aim() -> void:
 	if flying != null or board.over or paused or shop_open:
@@ -417,7 +497,7 @@ func _draw_home(th: Dictionary) -> void:
 	for i in 5:
 		_draw_bubble(Vector2(W / 2 + (i - 2) * 78, H * 0.40), 30, i)
 	_draw_pill(_home_play(), "Play", th, true)
-	_draw_pill(_home_themes(), "Themes", th, false)
+	_draw_pill(_home_themes(), "Shop", th, false)
 	_draw_sound_icon(_home_sound(), th)
 	var ab := _home_about()
 	draw_string(font, ab.position + Vector2(ab.size.x / 2 - _text_w("About", 26) / 2, ab.size.y / 2 + 9), "About", HL, -1, 26, _rgba(fg, 0.6))
@@ -455,7 +535,9 @@ func _draw_about(th: Dictionary) -> void:
 		"them before the stack reaches the line —",
 		"cross it and it's game over.",
 		"",
-		"Unlock new colour themes in the shop.",
+		"Unlock new colour themes in the shop, or",
+		"restyle your bubbles — gloss, neon, matte",
+		"or clear — free, any time.",
 	]
 	var y := SHEET_TOP + 148.0
 	for line in lines:
@@ -477,7 +559,7 @@ func _draw() -> void:
 		for p in pops:
 			var s: float = 1.0 if p.drop else 1.0 + p.t * 0.8
 			_draw_bubble(p.pos, r * s, p.ci, 1.0 - clamp(p.t, 0.0, 1.0))
-		draw_dashed_line(Vector2(0, loss_y), Vector2(W, loss_y), _rgba(Color(th.accent), 0.25), 2.0, 12.0)
+		draw_dashed_line(Vector2(0, loss_y), Vector2(W, loss_y), _rgba(Color(th.accent), 0.55), 3.5, 14.0)
 		_draw_aim()
 		if flying != null:
 			_draw_bubble(flying.pos, r, flying.ci)
@@ -517,8 +599,24 @@ func _click(pos: Vector2) -> void:
 			queue_redraw()
 		return
 	if shop_open:
-		if _shop_close().has_point(pos):
+		if _shop_close().has_point(pos) or pos.y < SHEET_TOP:   # X, or tap on the scrim
 			shop_open = false
+			queue_redraw()
+			return
+		if pos.y < SHEET_TOP + SHEET_HEAD:
+			return   # dead zone: fixed header band
+		for i in FINISHES.size():
+			if _finish_chip(i).has_point(pos):
+				bubble_style = FINISHES[i]
+				_save()
+				queue_redraw()
+				return
+		if _unlock_all_visible() and _unlock_row().has_point(pos):
+			# Mock-unlock like single themes; StoreKit "unlock all" bundle hooks in here.
+			for id in Themes.ORDER:
+				owned[id] = true
+			_save()
+			shop_scroll = clampf(shop_scroll, 0.0, _shop_max_scroll())
 			queue_redraw()
 			return
 		for i in Themes.ORDER.size():
@@ -535,6 +633,7 @@ func _click(pos: Vector2) -> void:
 			_save()
 		elif _home_themes().has_point(pos):
 			shop_open = true
+			shop_scroll = 0.0
 		elif _home_about().has_point(pos):
 			about_open = true
 		elif _home_play().has_point(pos):
@@ -561,28 +660,55 @@ func _click(pos: Vector2) -> void:
 		return
 	if _shop_btn().has_point(pos):
 		shop_open = true
+		shop_scroll = 0.0
 		queue_redraw()
 		return
 	# otherwise it's a fire (handled on release via aiming)
 
 func _input(event: InputEvent) -> void:
+	if shop_open and not about_open and event is InputEventMouseButton and event.pressed \
+			and (event.button_index == MOUSE_BUTTON_WHEEL_DOWN or event.button_index == MOUSE_BUTTON_WHEEL_UP):
+		shop_scroll = clampf(shop_scroll + (60.0 if event.button_index == MOUSE_BUTTON_WHEEL_DOWN else -60.0), 0.0, _shop_max_scroll())
+		queue_redraw()
+		return
 	if event is InputEventMouseButton and event.button_index == MOUSE_BUTTON_LEFT:
 		var mp := get_global_mouse_position()
 		if event.pressed:
+			if shop_open and not about_open:
+				# defer to release: a still press is a tap, a moving press scrolls the sheet
+				shop_pressing = true
+				shop_moved = false
+				shop_start = mp
+				shop_last = mp
+				return
 			# UI hit-tests happen on press; only start aiming if the press is in open play
-			if screen != "game" or about_open or shop_open or paused or board.over or _pause_btn().has_point(mp) or _shop_btn().has_point(mp):
+			if screen != "game" or about_open or paused or board.over or _pause_btn().has_point(mp) or _shop_btn().has_point(mp):
 				_click(mp)
 			else:
 				aim = mp
 				has_aim = true
 				aiming = true
+		else:
+			if shop_pressing:
+				shop_pressing = false
+				if not shop_moved:
+					_click(mp)
+				return
+			if aiming:
+				aim = mp
+				_fire()
+				aiming = false
+	elif event is InputEventMouseMotion:
+		if shop_pressing:
+			var mp := get_global_mouse_position()
+			shop_scroll = clampf(shop_scroll - (mp.y - shop_last.y), 0.0, _shop_max_scroll())
+			shop_last = mp
+			if absf(mp.y - shop_start.y) > 12.0:
+				shop_moved = true
+			queue_redraw()
 		elif aiming:
 			aim = get_global_mouse_position()
-			_fire()
-			aiming = false
-	elif event is InputEventMouseMotion and aiming:
-		aim = get_global_mouse_position()
-		has_aim = true
+			has_aim = true
 	elif event is InputEventKey and event.pressed:
 		if event.keycode == KEY_R:
 			_new_game()
