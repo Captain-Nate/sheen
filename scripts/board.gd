@@ -41,6 +41,15 @@ func new_game(start_colors := 5, start_rows := 5) -> void:
 		for col in grid[row].size():
 			grid[row][col] = randi() % start_colors
 
+## Load a Level-mode layout: strings of '0'-'5' (color) or '.' (empty).
+func load_level(rows: Array) -> void:
+	blank()
+	for ri in rows.size():
+		var s: String = rows[ri]
+		for ci in s.length():
+			if s[ci] != ".":
+				grid[ri][ci] = int(s[ci])
+
 func in_bounds(row: int, col: int) -> bool:
 	return row >= 0 and row < grid.size() and col >= 0 and col < grid[row].size()
 
