@@ -17,6 +17,8 @@ const HEADER_H := 110.0
 const SAVE_PATH := "user://sheen.cfg"
 const PRICE := "$1.99"
 const PRICE_ALL := "$4.99"
+const IAP_THEME_PREFIX := "com.captainnate.sheen.theme."   # + theme id
+const IAP_BUNDLE_ID := "com.captainnate.sheen.themes.all"
 const FINISHES := ["auto", "gloss", "neon", "matte", "clear"]   # bubble finish override; "auto" follows the theme
 const FINISH_COSTS := {"neon": 100, "matte": 200, "clear": 350}  # coin prices; auto+gloss start unlocked
 const COIN_RATE := 10                                            # 10 score = 1 coin
@@ -51,6 +53,8 @@ var best_score := 0              # best single-game score (home-screen bragging 
 var coins := 0                   # spendable currency: earned from score, spent in the shop
 var run_coins := 0               # coins earned during the current run (game-over line)
 var owned_finishes := {}         # bought bubble finishes; auto + gloss need no entry
+var iap_error := ""              # last StoreKit error, shown briefly in the shop header
+var iap_error_at := 0
 var screen := "home"          # "home" | "game"
 var about_open := false
 var sound_on := true
@@ -79,6 +83,9 @@ func _ready() -> void:
 	_layout()
 	get_viewport().size_changed.connect(_on_resize)
 	_load_save()
+	Store.product_delivered.connect(_on_iap_delivered)
+	Store.purchase_failed.connect(_on_iap_failed)
+	Store.restore_complete.connect(_on_iap_restore_done)
 	AudioServer.set_bus_mute(0, not sound_on)
 	board = Board.new()
 	_new_game()
@@ -204,10 +211,49 @@ func _buy_or_apply(id: String) -> void:
 			if coins < price:
 				return
 			coins -= price
-		# else premium: mock-unlock on web/desktop; StoreKit / Play Billing hooks in here.
-		owned[id] = true
-		_save()
+			owned[id] = true
+			_save()
+		else:   # premium
+			if _iap_enabled():
+				Store.buy(IAP_THEME_PREFIX + id)   # unlock arrives via _on_iap_delivered
+				return
+			owned[id] = true   # mock-unlock (web / desktop / no store)
+			_save()
 	_apply_theme(id)
+
+func _iap_enabled() -> bool:
+	return OS.get_name() == "iOS"
+
+func _restore_btn() -> Rect2:
+	return Rect2(W - 384.0, SHEET_TOP + 30.0, 150.0, 52.0)
+
+func _grant_everything() -> void:
+	for id in Themes.ORDER:
+		owned[id] = true
+	for f in FINISH_COSTS:
+		owned_finishes[f] = true
+
+# Entitlement arrived from StoreKit (a fresh purchase OR a restore). Unlock only —
+# the player taps Apply to equip, same as owning a coin theme.
+func _on_iap_delivered(product_id: String) -> void:
+	if product_id == IAP_BUNDLE_ID:
+		_grant_everything()
+	elif product_id.begins_with(IAP_THEME_PREFIX):
+		var tid := product_id.substr(IAP_THEME_PREFIX.length())
+		if Themes.THEMES.has(tid):
+			owned[tid] = true
+	_save()
+	shop_scroll = clampf(shop_scroll, 0.0, _shop_max_scroll())
+	queue_redraw()
+
+func _on_iap_failed(message: String) -> void:
+	iap_error = message
+	iap_error_at = Time.get_ticks_msec()
+	queue_redraw()
+
+func _on_iap_restore_done(_count: int) -> void:
+	_save()
+	queue_redraw()
 
 func _buy_finish(f: String) -> void:
 	if not _finish_owned(f):
@@ -550,10 +596,16 @@ func _draw_shop(th: Dictionary) -> void:
 	draw_rect(Rect2(0, 0, W, H), Color(0, 0, 0, 0.45))                                   # scrim
 	_rrect(Rect2(0, SHEET_TOP, W, H - SHEET_TOP + 40), Color(th.panel), 36, 0, Color(0, 0, 0, 0), 14)  # rounded sheet
 	# --- scrolled content ---
-	draw_string(font, Vector2(40, _content_y(38)), "Bubbles", HL, -1, 26, _rgba(fg, 0.55))
+	# Cull anything scrolled fully above the header band — otherwise it draws over
+	# the scrim above the sheet (the fixed header patch only covers its own band).
+	var clip_y := SHEET_TOP + SHEET_HEAD
+	if _content_y(38) > clip_y:
+		draw_string(font, Vector2(40, _content_y(38)), "Bubbles", HL, -1, 26, _rgba(fg, 0.55))
 	for i in FINISHES.size():
 		var f: String = FINISHES[i]
 		var chip := _finish_chip(i)
+		if chip.position.y + chip.size.y < clip_y:
+			continue
 		var locked := not _finish_owned(f)
 		if bubble_style == f:
 			_rrect(chip, _rgba(Color(th.accent), 0.13), 20, 3, Color(th.accent))
@@ -567,12 +619,14 @@ func _draw_shop(th: Dictionary) -> void:
 			var price: int = FINISH_COSTS[f]
 			var pc := Color(th.accent) if coins >= price else _rgba(fg, 0.5)
 			_draw_coin_amount(chip.position.x + chip.size.x / 2, chip.position.y + 104, price, 16, pc)
-	draw_string(font, Vector2(40, _content_y(222)), "Themes", HL, -1, 26, _rgba(fg, 0.55))
+	if _content_y(222) > clip_y:
+		draw_string(font, Vector2(40, _content_y(222)), "Themes", HL, -1, 26, _rgba(fg, 0.55))
 	if _unlock_all_visible():
 		var ur := _unlock_row()
-		_rrect(ur, _rgba(Color(th.accent), 0.08), 22, 2, _rgba(Color(th.accent), 0.55))
-		draw_string(font, Vector2(ur.position.x + 28, ur.position.y + ur.size.y / 2 + 11), "Unlock everything", HL, -1, 30, fg)
-		_draw_pill(Rect2(ur.position.x + ur.size.x - 184, ur.position.y + ur.size.y / 2 - 28, 160, 56), PRICE_ALL, th, true)
+		if ur.position.y + ur.size.y >= clip_y:
+			_rrect(ur, _rgba(Color(th.accent), 0.08), 22, 2, _rgba(Color(th.accent), 0.55))
+			draw_string(font, Vector2(ur.position.x + 28, ur.position.y + ur.size.y / 2 + 11), "Unlock everything", HL, -1, 30, fg)
+			_draw_pill(Rect2(ur.position.x + ur.size.x - 184, ur.position.y + ur.size.y / 2 - 28, 160, 56), PRICE_ALL, th, true)
 	for i in Themes.ORDER.size():
 		var id: String = Themes.ORDER[i]
 		var t: Dictionary = Themes.THEMES[id]
@@ -621,6 +675,17 @@ func _draw_shop(th: Dictionary) -> void:
 	var cb := _shop_close()
 	_rrect(cb, _rgba(fg, 0.10), int(cb.size.y / 2))
 	draw_string(font, cb.position + Vector2(cb.size.x / 2 - _text_w("X", 32) / 2, cb.size.y / 2 + 12), "X", HL, -1, 32, fg)
+	if _iap_enabled():
+		var rb := _restore_btn()
+		_rrect(rb, _rgba(fg, 0.10), int(rb.size.y / 2))
+		draw_string(font, Vector2(rb.position.x + rb.size.x / 2 - _text_w("Restore", 24) / 2, rb.position.y + rb.size.y / 2 + 8), "Restore", HL, -1, 24, fg)
+		# store status / recent error — the shop diagnoses itself, no console needed
+		var info: String = Store.status
+		var icol := _rgba(fg, 0.45)
+		if iap_error != "" and Time.get_ticks_msec() - iap_error_at < 6000:
+			info = iap_error
+			icol = _rgba(Color(th.accent), 0.95)
+		draw_string(font, Vector2(40, SHEET_TOP + 100), info, HL, int(W - 80.0), 18, icol)
 
 func _draw_aim() -> void:
 	if flying != null or board.over or paused or shop_open:
@@ -853,6 +918,9 @@ func _click(pos: Vector2) -> void:
 			shop_open = false
 			queue_redraw()
 			return
+		if _iap_enabled() and _restore_btn().has_point(pos):
+			Store.restore()
+			return
 		if pos.y < SHEET_TOP + SHEET_HEAD:
 			return   # dead zone: fixed header band
 		for i in FINISHES.size():
@@ -860,11 +928,10 @@ func _click(pos: Vector2) -> void:
 				_buy_finish(FINISHES[i])   # no-op if unaffordable; applies if owned
 				return
 		if _unlock_all_visible() and _unlock_row().has_point(pos):
-			# Mock-unlock like single themes; StoreKit "unlock all" bundle hooks in here.
-			for id in Themes.ORDER:
-				owned[id] = true
-			for f in FINISH_COSTS:
-				owned_finishes[f] = true
+			if _iap_enabled():
+				Store.buy(IAP_BUNDLE_ID)   # unlock-all arrives via _on_iap_delivered
+				return
+			_grant_everything()   # mock-unlock (web / desktop / no store)
 			_save()
 			shop_scroll = clampf(shop_scroll, 0.0, _shop_max_scroll())
 			queue_redraw()
@@ -897,6 +964,8 @@ func _click(pos: Vector2) -> void:
 		elif _home_themes().has_point(pos):
 			shop_open = true
 			shop_scroll = 0.0
+			if _iap_enabled():
+				Store.refresh_if_empty()
 		elif _home_about().has_point(pos):
 			about_open = true
 		elif _home_levels().has_point(pos):
@@ -935,6 +1004,8 @@ func _click(pos: Vector2) -> void:
 	if _shop_btn().has_point(pos):
 		shop_open = true
 		shop_scroll = 0.0
+		if _iap_enabled():
+			Store.refresh_if_empty()
 		queue_redraw()
 		return
 	var pick := _picker_hit(pos)

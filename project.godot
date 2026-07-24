@@ -16,6 +16,11 @@ run/main_scene="res://scenes/Main.tscn"
 config/features=PackedStringArray("4.7", "GL Compatibility")
 config/icon="res://icon.svg"
 
+[autoload]
+
+GodotIapPlugin="*uid://bonjdwbb48x31"
+Store="*res://scripts/store.gd"
+
 [display]
 
 window/size/viewport_width=720
@@ -24,12 +29,12 @@ window/stretch/mode="canvas_items"
 window/stretch/aspect="expand"
 window/handheld/orientation=1
 
+[editor_plugins]
+
+enabled=PackedStringArray("res://addons/godot-iap/plugin.cfg")
+
 [rendering]
 
 renderer/rendering_method="gl_compatibility"
 renderer/rendering_method.mobile="gl_compatibility"
 textures/vram_compression/import_etc2_astc=true
-
-[input_devices]
-
-pointing/emulate_mouse_from_touch=true
